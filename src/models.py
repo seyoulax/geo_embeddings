@@ -1,4 +1,4 @@
-from torch_geometric.nn import GATConv, GCNConv
+from torch_geometric.nn import GATConv, GCNConv, SAGEConv, GATConv
 
 import torch.nn.functional as F
 import torch.nn as nn
@@ -39,6 +39,7 @@ class GATBlock(nn.Module):
 
     
 # TRANSDACIVE MODELS
+
 #GCN
 class TransductiveGCN(nn.Module):
 
@@ -175,7 +176,7 @@ class TransductiveGAT(nn.Module):
         return self.decoder(x)
     
 # INDUCTIVE MODELS WITH IMGS
-    
+
 # GAT
 class InductiveGATwithIMGS(nn.Module):
     def __init__(self, n_in, n_out, hidden_dim, head, cnn_in_channels, cnn_out_channels, n_layers=1):
@@ -427,4 +428,86 @@ class CNNBlock(nn.Module):
         
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
+        return x
+    
+    
+    
+# UNSUPERVISED LEARNING
+
+# Infomax
+class DefaultEncoder(nn.Module):
+    def __init__(self, in_channels, hidden_dim, hidden_channels):
+        super().__init__()
+        
+        self.encoder = nn.Sequential(
+            nn.Linear(in_channels, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_channels)
+        )
+        
+        self.convs = nn.ModuleList([
+            SAGEConv(hidden_channels, 256),
+            SAGEConv(256, 512),
+            SAGEConv(512, hidden_channels)
+        ])
+
+        self.activations = nn.ModuleList()
+        self.activations.extend([
+            nn.PReLU(256),
+            nn.PReLU(512),
+            nn.PReLU(hidden_channels)
+        ])
+
+    def forward(self, x, edge_index, batch_size):
+        x = self.encoder(x)
+        
+        for conv, act in zip(self.convs, self.activations):
+            x = conv(x, edge_index)
+            x = act(x)
+            
+        return x[:batch_size]
+    
+class GATEncoder(nn.Module):
+    def __init__(
+        self,
+        n_in=128,
+        n_out=1,
+        hidden_dims=[256, 256],
+        heads=[2],
+    ):
+
+        super(GATEncoder, self).__init__()
+
+        self.encoder = nn.Sequential(
+            nn.Linear(n_in, hidden_dims[0]),
+            nn.LayerNorm(hidden_dims[0]),
+            nn.ReLU(),
+            nn.Linear(hidden_dims[0], hidden_dims[0]),
+        )
+        
+        heads = [1] + heads
+
+        self.conv_layers = nn.ModuleList(
+            GATBlock(h_in * n_head_in, h_out, n_head_out)
+            for h_in, h_out, n_head_in, n_head_out in zip(
+                hidden_dims, hidden_dims[1:], heads, heads[1:]
+            )
+        )
+
+        self.decoder = nn.Sequential(
+            nn.Linear(heads[-1] * hidden_dims[-1], hidden_dims[-1] * 4),
+            nn.LeakyReLU(negative_slope=0.1),
+            nn.Dropout(p=0.05),
+            nn.Linear(hidden_dims[-1] * 4, n_out),
+        )
+
+    def forward(self, x, edge_index, batch_size):
+        x = self.encoder(x)
+
+        for layer in self.conv_layers:
+            x = layer(x, edge_index)
+        
+        x = self.decoder(x)[:batch_size]
+        
         return x

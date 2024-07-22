@@ -2,12 +2,18 @@ import sklearn
 import torch
 import os
 import numpy as np
+import datetime
+from catboost import CatBoostRegressor, Pool
+from sklearn.metrics import r2_score
+import time
+import wandb
 
 from tqdm.notebook import tqdm
 from torch_geometric.loader import NeighborLoader
 
 from utils import set_seed, EarlyStoppingR2
 from models import TransductiveGAT, TransductiveGCN, InductiveGCNwithIMGS, InductiveGATwithIMGS
+
 
 SEED = 111
 
@@ -589,3 +595,155 @@ def train_embedder(
         #         "val_r2" : round(val_r2, 3)
         #     }
         # )
+
+        
+        
+        
+        
+        
+        
+        
+        
+        
+# UNSUPERVISED LEARNINGS INFOMAX
+
+def train_one_epoch_infomax(train_loader, model, epoch, optimizer, device):
+    model.train()
+
+    total_loss = total_examples = 0
+    for batch in tqdm(train_loader, desc=f'Epoch {epoch:02d}'):
+        
+        batch = batch.to(device)
+        
+        optimizer.zero_grad()
+        pos_z, neg_z, summary = model(batch.x, batch.edge_index,
+                                      batch.batch_size)
+        
+        loss = model.loss(pos_z, neg_z, summary)
+        loss.backward()
+        optimizer.step()
+        total_loss += float(loss) * pos_z.size(0)
+        total_examples += pos_z.size(0)
+
+    return total_loss / total_examples
+
+
+@torch.no_grad()
+def val_one_epoch_infomax(test_loader, model, data, epoch, device):
+    
+    model.eval()
+    zs = []
+    for batch in test_loader:
+        batch = batch.to(device)
+        pos_z, _, _ = model(batch.x, batch.edge_index, batch.batch_size)
+        zs.append(pos_z.cpu())
+    out = torch.cat(zs, dim=0).to(device)
+    
+    all_folds_val_r2 = []
+    all_folds_train_r2 = []
+    
+    for fold in tqdm(range(5), desc='Cross val'):
+
+        clf = CatBoostRegressor(
+            iterations=500,
+            task_type="GPU",
+            border_count=128
+        )   
+        
+        train_data = torch.cat((out[getattr(data, f"train_fold_{fold}")], data.x[getattr(data, f"train_fold_{fold}")]), -1)
+        val_data = torch.cat((out[getattr(data, f"val_fold_{fold}")], data.x[getattr(data, f"val_fold_{fold}")]), -1) 
+        
+        train_pool = Pool(data=train_data.cpu().numpy(), label=data.y[getattr(data, f"train_fold_{fold}")].cpu().numpy())
+        eval_pool = Pool(data=val_data.cpu().numpy(), label=data.y[getattr(data, f"val_fold_{fold}")].cpu().numpy())
+
+        clf.fit(
+            train_pool, 
+            eval_set=[eval_pool],
+            use_best_model=True,
+            logging_level="Silent"
+        )
+        
+        train_preds = clf.predict(train_pool)
+        val_preds = clf.predict(eval_pool)
+        
+        train_r2 = r2_score(train_pool.get_label(), train_preds)
+        val_r2 = r2_score(eval_pool.get_label(), val_preds)
+        
+        all_folds_train_r2.append(train_r2)
+        all_folds_val_r2.append(val_r2)
+        
+    all_folds_train_r2 = np.mean(all_folds_train_r2) 
+    all_folds_val_r2 = np.mean(all_folds_val_r2)
+
+    return (all_folds_train_r2, all_folds_val_r2)
+    
+
+def train_infomax(dataset, train_loader, test_loader, model, epochs, optimizer, model_save_path, device, use_wndb=False):
+    min_loss = np.inf
+    max_r2 = -np.inf
+    
+    for epoch in range(1, epochs+1):
+        start = time.time()
+
+        train_loss = train_one_epoch_infomax(train_loader, model, epoch, optimizer, device)
+
+        time_left = (time.time() - start) * (epochs - epoch)
+        time_left = str(datetime.timedelta(seconds=time_left))
+
+        print(f'Train loss: {np.round(train_loss, 5):.4f}, ',
+              f'Time left: {time_left}')
+
+        if epoch % 25 != 0:
+            if train_loss < min_loss:
+                print('Save new model')
+                min_loss = train_loss
+                torch.save(model.state_dict(), f'{model_save_path}/best_loss_models/{epoch}_{np.round(train_loss, 5)}.pth')
+            if use_wndb: wandb.log({"Train loss": train_loss})
+        else:
+            all_folds_train_r2, all_folds_val_r2 = val_one_epoch_infomax(test_loader, model, dataset, epoch, device)
+            print(f'Train R2: {np.round(all_folds_train_r2, 5):.4f}, ',
+                  f'Val R2: {np.round(all_folds_val_r2, 5):.4f}, ')
+            if all_folds_val_r2 > max_r2:
+                print('Save new model')
+                max_r2 = all_folds_val_r2
+                torch.save(model.state_dict(), f'{model_save_path}/best_r2_models/{epoch}_{np.round(train_loss, 5)}_{np.round(all_folds_val_r2, 5)}.pth')
+            if use_wndb: wandb.log({"Train R2": all_folds_train_r2, "Val R2": all_folds_val_r2})
+            
+              
+def test_infomax(dataset, model):
+    all_pos_z = model(dataset.x, dataset.edge_index, len(dataset.x))[0]
+    all_folds_val_r2, all_folds_train_r2 =[], []
+
+    for fold in range(5):
+        clf = CatBoostRegressor(
+                iterations=500,
+                task_type="GPU",
+                border_count=128
+            )
+        train_data = torch.cat((all_pos_z[getattr(dataset, f"train_fold_{fold}")], dataset.x[getattr(dataset, f"train_fold_{fold}")]), -1)
+        val_data = torch.cat((all_pos_z[getattr(dataset, f"val_fold_{fold}")], dataset.x[getattr(dataset, f"val_fold_{fold}")]), -1)
+
+        train_pool = Pool(data=train_data.cpu().detach().numpy(), label=dataset.y[getattr(dataset, f"train_fold_{fold}")].cpu().detach().numpy())
+        eval_pool = Pool(data=val_data.cpu().detach().numpy(), label=dataset.y[getattr(dataset, f"val_fold_{fold}")].cpu().detach().numpy())
+
+        clf.fit(
+                train_pool, 
+                eval_set=[eval_pool],
+                use_best_model=True,
+                verbose=10
+            )
+
+        val_preds = clf.predict(eval_pool)
+        train_preds = clf.predict(train_pool)
+
+        val_r2 = r2_score(eval_pool.get_label(), val_preds)
+        train_r2 = r2_score(train_pool.get_label(), train_preds)
+
+        all_folds_val_r2.append(val_r2)
+        all_folds_train_r2.append(train_r2)
+
+
+    all_folds_val_r2 = np.mean(all_folds_val_r2)
+    all_folds_train_r2 = np.mean(all_folds_train_r2)
+    
+    return all_folds_train_r2, all_folds_val_r2
