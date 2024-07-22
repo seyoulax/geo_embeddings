@@ -12,7 +12,7 @@ from tqdm.notebook import tqdm
 from torch_geometric.loader import NeighborLoader
 
 from utils import set_seed, EarlyStoppingR2
-from models import TransductiveGAT, TransductiveGCN, InductiveGCNwithIMGS, InductiveGATwithIMGS
+from models import TransductiveGAT, TransductiveGCN, InductiveGCN, InductiveGAT
 
 
 SEED = 111
@@ -239,7 +239,7 @@ def train_one_epoch_inductive(train_loader, model, optimizer, loss_fn, use_pretr
             out = model(batch)[:batch.batch_size]
             
         y = batch.y[:batch.batch_size].squeeze()
-
+        
         train_loss = loss_fn(out.view(-1), y)
         
         train_r2 = sklearn.metrics.r2_score(
@@ -416,10 +416,10 @@ def cross_val_inductive(
         )
         
         if model_name == "GCN":
-            cur_fold_model = InductiveGCNwithIMGS(**model_params).to(device)
+            cur_fold_model = InductiveGCN(**model_params).to(device)
             
         if model_name == "GAT":
-            cur_fold_model = InductiveGATwithIMGS(**model_params).to(device)
+            cur_fold_model = InductiveGAT(**model_params).to(device)
         
         loss_fn_cur_fold = torch.nn.MSELoss()
         

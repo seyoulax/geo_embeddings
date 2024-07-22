@@ -178,10 +178,10 @@ class TransductiveGAT(nn.Module):
 # INDUCTIVE MODELS WITH IMGS
 
 # GAT
-class InductiveGATwithIMGS(nn.Module):
-    def __init__(self, n_in, n_out, hidden_dim, head, cnn_in_channels, cnn_out_channels, n_layers=1):
+class InductiveGAT(nn.Module):
+    def __init__(self, n_in, n_out, hidden_dim, head, cnn_in_channels=0, cnn_out_channels=0, n_layers=1, use_imgs=False):
         
-        super(InductiveGATwithIMGS, self).__init__()
+        super(InductiveGAT, self).__init__()
         
         hidden_dims = [hidden_dim] * (n_layers + 1)
         heads = [head] * n_layers
@@ -200,7 +200,10 @@ class InductiveGATwithIMGS(nn.Module):
             for h_in, h_out, n_head_in, n_head_out in zip(hidden_dims, hidden_dims[1:], heads, heads[1:])
         )
         
-        self.cnn = CNNBlock(cnn_in_channels, cnn_out_channels)
+        self.use_imgs = use_imgs
+        if use_imgs:
+            self.cnn = CNNBlock(cnn_in_channels, cnn_out_channels)
+            
         self.pre_gnn = nn.Linear(hidden_dim, hidden_dims[0])
         
         self.decoder = nn.Sequential(
@@ -216,17 +219,19 @@ class InductiveGATwithIMGS(nn.Module):
         
         x = self.encoder(x)
         
-        if use_pretrained:
-            x_cnn = pretrained_model(x_images.float())
-        else:
-            x_cnn = self.cnn(x_images)
-        
         x_gnn = self.pre_gnn(x)
         
         for layer in self.gconv_layers:
             x_gnn = layer(x_gnn, edge_index)
-            
-        x_cat = torch.cat((x_gnn, x_cnn), dim=1)  
+        
+        if self.use_imgs:
+            if use_pretrained:
+                x_cnn = pretrained_model(x_images.float())
+            else:
+                x_cnn = self.cnn(x_images)
+            x_cat = torch.cat((x_gnn, x_cnn), dim=1)  
+        else:
+            x_cat = x_gnn
             
         return self.decoder(x_cat)
     
@@ -235,11 +240,6 @@ class InductiveGATwithIMGS(nn.Module):
         self.eval()
         
         x_all = self.encoder(x_all)
-        
-        if use_pretrained:
-            x_cnn_all = pretrained_model(x_images_all.float())
-        else:
-            x_cnn_all = self.cnn(x_images_all)
         
         x_gnn_all = self.pre_gnn(x_all)
         
@@ -252,12 +252,19 @@ class InductiveGATwithIMGS(nn.Module):
                 xs.append(out)
             x_gnn_all = torch.cat(xs, dim=0)
         
-        x_cat = torch.cat([x_gnn_all, x_cnn_all], dim=1)
+        if self.use_imgs:
+            if use_pretrained:
+                x_cnn_all = pretrained_model(x_images_all.float())
+            else:
+                x_cnn_all = self.cnn(x_images_all)
+            x_cat = torch.cat([x_gnn_all, x_cnn_all], dim=1)
+        else:
+            x_cat = x_gnn_all
         
-        return self.decoder(x_gnn_all)
+        return self.decoder(x_cat)
     
 # GCN
-class InductiveGCNwithIMGS(nn.Module):
+class InductiveGCN(nn.Module):
 
     def __init__(
         self,
@@ -265,12 +272,13 @@ class InductiveGCNwithIMGS(nn.Module):
         n_out=1,
         hidden_dim=128,
         n_layers=1,
-        cnn_in_channels=12,
-        cnn_out_channels=128,
+        cnn_in_channels=0,
+        cnn_out_channels=0,
         image_size=None,
+        use_imgs=False
     ):
         
-        super(InductiveGCNwithIMGS, self).__init__()
+        super(InductiveGCN, self).__init__()
         
         hidden_dims = []
         factor = 1
@@ -285,8 +293,10 @@ class InductiveGCNwithIMGS(nn.Module):
             nn.Linear(hidden_dims[0], hidden_dims[0]),
             nn.LayerNorm(hidden_dims[0]),
         )
-
-        self.cnn = CNNBlock(cnn_in_channels, cnn_out_channels)
+        
+        self.use_imgs = use_imgs
+        if use_imgs:
+            self.cnn = CNNBlock(cnn_in_channels, cnn_out_channels)
 
 
         self.gconv_layers = nn.ModuleList(
@@ -311,13 +321,15 @@ class InductiveGCNwithIMGS(nn.Module):
 
         for layer in self.gconv_layers:
             x = layer(x, edge_index)
-            
-        if use_pretrained:
-            x_cnn = pretrained_model(imgs.float())
-        else:
-            x_cnn = self.cnn(imgs.float())
         
-        x_cat = torch.cat((x, x_cnn), dim=1)
+        if self.use_imgs:
+            if use_pretrained:
+                x_cnn = pretrained_model(imgs.float())
+            else:
+                x_cnn = self.cnn(imgs)
+            x_cat = torch.cat((x, x_cnn), dim=1)  
+        else:
+            x_cat = x
 
         return self.decoder(x_cat)
 
@@ -341,14 +353,16 @@ class InductiveGCNwithIMGS(nn.Module):
             
             x_all = torch.cat(xs, dim=0)
             
-        if use_pretrained:
-            x_cnn = pretrained_model(images.float())
+        if self.use_imgs:
+            if use_pretrained:
+                x_cnn = pretrained_model(images.float())
+            else:
+                x_cnn = self.cnn(images)
+            x_cat = torch.cat((x_all, x_cnn), dim=1)  
         else:
-            x_cnn = self.cnn(images.float())
-            
-        x = torch.cat((x_all, x_cnn), dim=1)
+            x_cat = x_all
         
-        return self.decoder(x)
+        return self.decoder(x_cat)
     
     
     
