@@ -459,3 +459,133 @@ def cross_val_inductive(
         
     print(f"mean best_val_score = {np.mean(best_scores):4f}")
     return np.mean(best_scores).round(4)
+
+
+
+
+
+
+
+
+
+
+# UNSUPERVISED LEARNINGS GRAPHSAGE
+
+def train_one_epoch_GraphSage(loader, model, optimizer, reduction="mean"):
+    
+    model.train()
+    
+    total_loss = 0.0
+        
+    for i, batch in enumerate(loader):
+        
+        batch = batch.to(cfg.device)
+        h = model(batch.x, batch.edge_index)
+        
+        h_src = h[batch.edge_label_index[0]]
+        h_dst = h[batch.edge_label_index[1]]
+        pred = (h_src * h_dst).sum(dim=-1)
+        loss = F.binary_cross_entropy_with_logits(pred, batch.edge_label)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item() * pred.size(0)
+        
+    return total_loss / cfg.graph_num_nodes
+
+def eval_one_epoch_GraphSage_catboost(model, dataset, return_hidden=False):
+    
+    model.eval()
+    
+    with torch.no_grad():
+        out = model(dataset.x, dataset.edge_index).cpu()
+    
+    all_folds_val_r2 = []
+    
+    for fold in range(5):
+
+        clf = CatBoostRegressor(
+            iterations=500,
+            task_type="GPU",
+            border_count=254,
+            random_state=cfg.seed,
+            eval_metric="RMSE",
+            use_best_model=True
+        )
+
+        train_pool = Pool(data=out[getattr(dataset, f"train_fold_{fold}")].numpy(), label=dataset.y[getattr(dataset, f"train_fold_{fold}")].numpy())
+        eval_pool = Pool(data=out[getattr(dataset, f"val_fold_{fold}")].numpy(), label=dataset.y[getattr(dataset, f"val_fold_{fold}")].numpy())
+
+        clf.fit(
+            train_pool, 
+            verbose=0,
+            eval_set=[eval_pool],
+        )
+        
+        val_preds = clf.predict(eval_pool)
+        
+        val_score = r2_score(eval_pool.get_label(), val_preds.reshape(-1))
+        
+        all_folds_val_r2.append(val_score)
+        
+    all_folds_val_r2 = np.mean(all_folds_val_r2)
+
+    if return_hidden: 
+        return all_folds_val_r2, out
+    else: 
+        return all_folds_val_r2
+    
+
+def train_embedder(
+    model=None, 
+    loader=None, 
+    optimizer=None, 
+    train_cfg=None,
+    full_dataset=None,
+    earlystopper_loss=None,
+    earlystopper_r2=None
+
+):
+
+    stream = tqdm(range(train_cfg.num_epochs))
+    
+    val_r2 = 0
+
+    for epoch in stream:
+
+        #training
+        loss = train_one_epoch(         
+            loader=loader,
+            model=model,
+            optimizer=optimizer, 
+            reduction="mean"
+        )
+        
+        if epoch % 25 == 0:
+            
+            val_r2, h = eval_one_epoch_catboost(
+                model,
+                full_dataset,
+                return_hidden=True
+            )
+            
+            plot_embeddings(
+                train_dataset=full_dataset,
+                out=h,
+                epoch=epoch
+            )
+
+        stream.set_description(f"train loss: {round(loss, 5)}, val r2: {val_r2}")
+
+        #saving model if its best till now
+        earlystopper_loss(loss, model) 
+        earlystopper_r2(val_r2, model)
+        
+        # wandb.log(
+        #     {
+        #         "loss" : round(loss, 5), 
+        #         "val_r2" : round(val_r2, 3)
+        #     }
+        # )
